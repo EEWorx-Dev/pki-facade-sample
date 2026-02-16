@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           xmlns:tns="http://pki.learning.eeworx.dev/api"
+           targetNamespace="http://pki.learning.eeworx.dev/api"
+           elementFormDefault="qualified">
+
+  <xs:element name="CertificateBundle" type="tns:CertificateBundle"/>
+
+  <xs:complexType name="CertificateBundle">
+    <xs:sequence>
+      <xs:element name="deviceId" type="xs:string"/>
+      <xs:element name="bundleId" type="xs:string"/>
+      <xs:element name="generatedAt" type="xs:dateTime"/>
+      <xs:element name="components" type="tns:Components"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="Components">
+    <xs:sequence>
+      <xs:element name="component" type="tns:CertificateComponent" maxOccurs="unbounded"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="CertificateComponent">
+    <xs:sequence>
+      <xs:element name="purpose" type="tns:Purpose"/>
+      <xs:element name="serialNumber" type="xs:string"/>
+      <xs:element name="subjectDn" type="xs:string"/>
+      <xs:element name="issuedAt" type="xs:dateTime"/>
+      <xs:element name="expiresAt" type="xs:dateTime"/>
+      <xs:element name="certificatePem" type="xs:string"/>
+      <xs:element name="privateKeyPem" type="xs:string" minOccurs="0"/>
+      <xs:element name="chainPem" type="xs:string" minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:simpleType name="Purpose">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="tls"/>
+      <xs:enumeration value="signing"/>
+      <xs:enumeration value="encryption"/>
+    </xs:restriction>
+  </xs:simpleType>
+</xs:schema>
