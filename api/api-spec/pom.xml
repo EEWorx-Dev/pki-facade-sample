@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>dev.eeworx.learning.pki</groupId>
+    <artifactId>api</artifactId>
+    <version>0.1-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>api-spec</artifactId>
+  <packaging>jar</packaging>
+
+  <name>EEWorx :: Learning :: PKI-Facade :: API Spec</name>
+
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-dependencies</artifactId>
+        <version>3.5.10</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <dependencies>
+    <!-- Required for XML support in generated models -->
+    <dependency>
+      <groupId>org.glassfish.jaxb</groupId>
+      <artifactId>jaxb-runtime</artifactId>
+    </dependency>
+
+    <!-- Spring Boot (so the generated project has correct parent and starters) -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+
+    <!-- Optional but useful -->
+    <dependency>
+      <groupId>org.springdoc</groupId>
+      <artifactId>springdoc-openapi-ui</artifactId>
+      <version>1.8.0</version>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.dataformat</groupId>
+      <artifactId>jackson-dataformat-xml</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.openapitools</groupId>
+      <artifactId>jackson-databind-nullable</artifactId>
+      <version>0.2.8</version>
+    </dependency>
+
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.openapitools</groupId>
+        <artifactId>openapi-generator-maven-plugin</artifactId>
+        <version>7.18.0</version>
+        <executions>
+          <execution>
+            <id>generate-api</id>
+            <goals>
+              <goal>generate</goal>
+            </goals>
+            <configuration>
+              <inputSpec>${project.basedir}/src/main/resources/spec/pki-facade-api.yml</inputSpec>
+              <generatorName>spring</generatorName>
+              <output>${project.build.directory}/generated-project</output>
+
+              <generateSupportingFiles>true</generateSupportingFiles>
+              <generateApis>true</generateApis>
+              <generateModels>true</generateModels>
+
+              <apiPackage>${project.groupId}.api.controllers</apiPackage>
+              <modelPackage>${project.groupId}.api.dto</modelPackage>
+
+              <configOptions>
+                <parentGroupId>org.springframework.boot</parentGroupId>
+                <parentArtifactId>spring-boot-starter-parent</parentArtifactId>
+                <parentVersion>3.5.10</parentVersion>
+
+                <useSpringBoot3>true</useSpringBoot3>
+                <interfaceOnly>false</interfaceOnly>
+                <delegatePattern>true</delegatePattern>
+                <useTags>true</useTags>
+                <useBeanValidation>true</useBeanValidation>
+                <useLombok>true</useLombok>
+                <withXml>true</withXml>
+              </configOptions>
+
+              <library>spring-boot</library>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-source-plugin</artifactId>
+        <version>3.4.0</version>
+        <executions>
+          <execution>
+            <goals>
+              <goal>jar</goal>
+            </goals>
+            <id>jar</id>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

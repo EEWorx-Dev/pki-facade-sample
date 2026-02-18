@@ -18,7 +18,7 @@
   </properties>
     
   <modules>
-    <module>api-model</module>
+    <module>api-spec</module>
   </modules>
 
   <dependencyManagement>

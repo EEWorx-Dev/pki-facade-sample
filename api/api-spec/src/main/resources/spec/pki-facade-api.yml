@@ -1,0 +1,427 @@
+openapi: 3.1.0
+info:
+  title: PKI Facade API – Entrust-backed with EST Support
+  description: |
+    RESTful API facade for managing certificates, keys, devices, cryptographic operations,
+    and automated device provisioning via Enrollment over Secure Transport (EST – RFC 7030).
+
+    Key design principles:
+    • PKI owns full lifecycle of certificates & signing keys (server-generated keys for tls & signing purposes).
+    • Signing private keys are delivered to devices via bundles (when server-generated).
+    • EST initial enrollment uses mutual TLS with bootstrap certificate + X-API-Key header.
+    • Bundles support multiple formats (JSON, XML, ZIP, PKCS#12) and short-lived / protected access.
+    • All endpoints require HTTPS and X-API-Key authentication.
+  version: 2.0.0
+  contact:
+    name: API Team
+  license:
+    identifier: Internal
+    name: Internal Use Only
+externalDocs:
+  description: RFC 7030 – Enrollment over Secure Transport
+  url: https://datatracker.ietf.org/doc/html/rfc7030
+servers:
+  - url: https://api.pki.learning.eeworx.dev/v2
+    description: Production environment
+  - url: https://api-dev.pki.learning.eeworx.dev/v2
+    description: Development / staging
+tags:
+  - name: Certificates
+    description: Certificate lifecycle (issue, renew, revoke, status, list)
+  - name: Devices
+    description: Device registry and scoped resources
+  - name: Keys
+    description: Key generation and metadata
+  - name: Encryption
+    description: Symmetric & asymmetric encryption, signing & verification
+  - name: Bundles
+    description: Device credential bundles (TLS + signing private keys + encryption cert)
+  - name: EST
+    description: Enrollment over Secure Transport (RFC 7030)
+components:
+  securitySchemes:
+    ApiKeyHeader:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: Required on every request
+  schemas:
+    CertificateRequest:
+      type: object
+      properties:
+        csr:
+          type: string
+          format: pem
+          description: Optional PEM-encoded CSR (if omitted, server generates keypair)
+        subjectDn:
+          type: string
+          example: CN=device-123.example.com,O=ExampleCorp,OU=IoT
+        validityDays:
+          type: integer
+          minimum: 1
+          maximum: 3650
+          example: 365
+        purpose:
+          type: string
+          enum: [tls, signing, encryption, other]
+          example: tls
+      required: [subjectDn, validityDays, purpose]
+
+    CertificateResponse:
+      type: object
+      properties:
+        serialNumber:
+          type: string
+        certificatePem:
+          type: string
+          format: pem
+        privateKeyPem:
+          type: string
+          format: pem
+          description: Returned only if server-generated
+        chainPem:
+          type: string
+          format: pem
+        issuedAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+      required: [serialNumber, certificatePem, issuedAt, expiresAt]
+
+    CertificateSummary:
+      type: object
+      properties:
+        serialNumber: { type: string }
+        subjectDn: { type: string }
+        purpose: { type: string, enum: [tls, signing, encryption, other] }
+        status: { type: string, enum: [active, revoked, expired, pending] }
+        issuedAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+
+    CertificateBundleJson:
+      type: object
+      required: [deviceId, bundleId, generatedAt, components]
+      properties:
+        deviceId: { type: string, example: dev-uuid-abc123 }
+        bundleId: { type: string, example: bundle-20260213-uuid-789 }
+        generatedAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+        components:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              purpose: { type: string, enum: [tls, signing, encryption] }
+              serialNumber: { type: string }
+              subjectDn: { type: string }
+              issuedAt: { type: string, format: date-time }
+              expiresAt: { type: string, format: date-time }
+              certificatePem: { type: string, format: pem }
+              privateKeyPem:
+                type: string
+                format: pem
+                description: Included for tls and signing when server-generated
+              chainPem: { type: string, format: pem }
+        metadata:
+          type: object
+          properties:
+            rootCaThumbprint: { type: string, format: sha256 }
+            cloudVerificationCertPem:
+              type: string
+              format: pem
+              description: Optional – public cert for device to verify cloud signatures
+
+    EncryptionRequest:
+      type: object
+      required: [data, algorithm, keyReference]
+      properties:
+        data: { type: string, format: base64 }
+        algorithm: { type: string, example: AES-256-GCM or SHA256withECDSA }
+        keyReference: { type: string, example: /devices/dev-123/keys/key-456 }
+        iv: { type: string, format: base64, description: For symmetric }
+
+    EncryptionResponse:
+      type: object
+      properties:
+        result: { type: string, format: base64 }
+        iv: { type: string, format: base64 }
+        tag: { type: string, format: base64 }
+
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: integer }
+        message: { type: string }
+
+  parameters:
+    deviceId:
+      name: deviceId
+      in: path
+      required: true
+      schema: { type: string }
+    certId:
+      name: certId
+      in: path
+      required: true
+      schema: { type: string }
+    limit:
+      name: limit
+      in: query
+      schema: { type: integer, default: 20, minimum: 1 }
+    offset:
+      name: offset
+      in: query
+      schema: { type: integer, default: 0, minimum: 0 }
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid X-API-Key
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Forbidden:
+      description: Insufficient permissions or private keys not authorized
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+paths:
+  /certificates:
+    get:
+      tags: [Certificates]
+      summary: List/search certificates (global view)
+      operationId: listCertificates
+      parameters:
+        - name: deviceId
+          in: query
+          schema: { type: string }
+        - name: purpose
+          in: query
+          schema: { type: string, enum: [tls, signing, encryption, other] }
+        - name: status
+          in: query
+          schema: { type: string, enum: [active, revoked, expired, pending] }
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+      responses:
+        '200':
+          description: Paginated list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/CertificateSummary' } }
+                  total: { type: integer }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+    post:
+      tags: [Certificates]
+      summary: Issue new certificate (global / shared)
+      operationId: issueCertificateGlobal
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CertificateRequest' }
+      responses:
+        '201':
+          description: Certificate created
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/CertificateResponse' } }
+
+  /certificates/{certId}:
+    get:
+      tags: [Certificates]
+      summary: Get certificate details
+      operationId: getCertificate
+      parameters:
+        - $ref: '#/components/parameters/certId'
+      responses:
+        '200':
+          description: Certificate Summary
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/CertificateResponse' } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /devices/{deviceId}/certificates:
+    post:
+      tags: [Certificates, Devices]
+      summary: Issue certificate for specific device
+      operationId: issueDeviceCertificate
+      parameters:
+        - $ref: '#/components/parameters/deviceId'
+      requestBody:
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/CertificateRequest' } }
+      responses:
+        '201':
+          description: cert
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/CertificateResponse' } }
+
+  /devices/{deviceId}/bundle:
+    get:
+      tags: [Bundles, Devices]
+      summary: Download device credential bundle
+      description: |
+        Returns TLS keypair, signing keypair (private + cert), encryption cert (public only).
+        Private keys included for tls & signing purposes when server-generated.
+        Use mTLS + API key; prefer short-lived bundles and one-time download enforcement.
+      operationId: getDeviceBundle
+      security:
+        - ApiKeyHeader: []
+      parameters:
+        - $ref: '#/components/parameters/deviceId'
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum: [json, xml, zip, pkcs12]
+            default: json
+        - name: password
+          in: query
+          schema: { type: string }
+          description: Required for pkcs12
+        - name: includeChain
+          in: query
+          schema: { type: boolean, default: true }
+        - name: purpose
+          in: query
+          schema: { type: string }
+          description: Comma-separated subset (tls,signing,encryption)
+      responses:
+        '200':
+          description: Bundle in requested format
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CertificateBundleJson' }
+            application/xml:
+              schema: { type: string, format: binary }
+            application/zip:
+              schema: { type: string, format: binary }
+            application/pkcs12:
+              schema: { type: string, format: binary }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '410':
+          description: Bundle expired or already consumed
+
+  /encryption/sign:
+    post:
+      tags: [Encryption]
+      summary: Cloud/backend signs data
+      description: |
+        Signs data using a cloud-managed private key (not per-device keys).
+        Devices sign locally using private key from bundle.
+      operationId: cloudSign
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EncryptionRequest' }
+      responses:
+        '200':
+          description: Result of Encryption Signings
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/EncryptionResponse' } }
+
+  /encryption/verify:
+    post:
+      tags: [Encryption]
+      summary: Verify signature
+      operationId: verifySignature
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                data: { type: string, format: base64 }
+                signature: { type: string, format: base64 }
+                algorithm: { type: string }
+                certReference: { type: string }
+      responses:
+        '200':
+          description: Verification result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  valid: { type: boolean }
+
+  /.well-known/est/{profile}/cacerts:
+    get:
+      tags: [EST]
+      summary: Get CA certificates
+      operationId: estGetCaCerts
+      parameters:
+        - name: profile
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: CA certificates in PKCS7 format.
+          content:
+            application/pkcs7-mime:
+              schema: { type: string, format: binary }
+
+  /.well-known/est/{profile}/simpleenroll:
+    post:
+      tags: [EST]
+      summary: Initial enrollment
+      description: |
+        Uses mTLS with bootstrap certificate + X-API-Key.
+        Server generates keypairs (including signing private key) if needed.
+        Private keys delivered later via /bundle.
+      operationId: estSimpleEnroll
+      parameters:
+        - name: profile
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        content:
+          application/pkcs10:
+            schema: { type: string, format: binary }
+      responses:
+        '200':
+          description: cert
+          content:
+            application/pkcs7-mime:
+              schema: { type: string, format: binary }
+
+  /.well-known/est/{profile}/simplereenroll:
+    post:
+      tags: [EST]
+      summary: Re-enrollment / renewal
+      operationId: estSimpleReenroll
+      parameters:
+        - name: profile
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        content:
+          application/pkcs10:
+            schema: { type: string, format: binary }
+      responses:
+        '200':
+          description: cert
+          content:
+            application/pkcs7-mime:
+              schema: { type: string, format: binary }
+
+security:
+  - ApiKeyHeader: []
+  
