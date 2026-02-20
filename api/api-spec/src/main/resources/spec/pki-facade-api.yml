@@ -1,427 +1,953 @@
 openapi: 3.1.0
 info:
-  title: PKI Facade API – Entrust-backed with EST Support
+  title: Certificate Lifecycle Management API (Poor Man's PKI)
   description: |
-    RESTful API facade for managing certificates, keys, devices, cryptographic operations,
-    and automated device provisioning via Enrollment over Secure Transport (EST – RFC 7030).
+    RESTful API for managing the full lifecycle of certificates in a lightweight PKI-like system.
 
-    Key design principles:
-    • PKI owns full lifecycle of certificates & signing keys (server-generated keys for tls & signing purposes).
-    • Signing private keys are delivered to devices via bundles (when server-generated).
-    • EST initial enrollment uses mutual TLS with bootstrap certificate + X-API-Key header.
-    • Bundles support multiple formats (JSON, XML, ZIP, PKCS#12) and short-lived / protected access.
-    • All endpoints require HTTPS and X-API-Key authentication.
+    ## Certificate Lifecycle Rules Summary
+
+    **Purposes** — Only `identity`, `encryption`, `signing` are supported.  
+    • `identity`: one certificate per device (gateway/server); TLS client/server distinction lives **only** in KeyUsage/ExtendedKeyUsage fields.  
+    • `encryption`: multiple allowed, distinguished by key hierarchy (e.g. BAA, RTG, Provider, Crypto).  
+    • `signing`: typically one per recipient.
+
+    **Statuses** — pending → active (explicit PATCH only) → expired (automatic) / revoked (explicit DELETE).
+
+    **Creation & Renewal**  
+    • New certificates start in `pending`.  
+    • Duplicates allowed (new version) for renewal.  
+    • **409 Conflict** returned if a `pending` certificate already exists for the same recipient + purpose during provisioning or renewal.
+
+    **Activation** — Only `pending` → `active` via PATCH is supported.
+
+    **Revocation** — DELETE marks as `revoked`; optional reason in body.
+
+    **Retrieval**  
+    • Telescopic: basic info → /details (parsed fields) → /content (PEM).  
+    • `?fetchContent=true` embeds content inline on many endpoints.  
+    • Content control: `?includePublic=true/false` (default true), `?includePrivate=true/false` (default false).
+
+    **Device Projections**  
+    • Gateways support `/identity`, `/signing` (404 if none), `/encryption` (404 if none), and `/bundle` (full content package).  
+    • Servers only have identity certificate.
+
+    **Security**  
+    All operations require **both** `X-API-Key` and client certificate headers (`X-Client-Cert-CN` + `X-Client-Cert-DN`) forwarded by reverse proxy.
+
+    **Errors** — Standardized as `application/problem+json` (RFC 9457): 400, 401, 404, 409 (pending conflict).
+    
   version: 2.0.0
   contact:
-    name: API Team
-  license:
-    identifier: Internal
-    name: Internal Use Only
-externalDocs:
-  description: RFC 7030 – Enrollment over Secure Transport
-  url: https://datatracker.ietf.org/doc/html/rfc7030
+    name: Elisha Ebenezer
+
 servers:
   - url: https://api.pki.learning.eeworx.dev/v2
-    description: Production environment
+    description: Production
   - url: https://api-dev.pki.learning.eeworx.dev/v2
     description: Development / staging
+    
+
 tags:
   - name: Certificates
-    description: Certificate lifecycle (issue, renew, revoke, status, list)
+    description: Core certificate operations
   - name: Devices
-    description: Device registry and scoped resources
-  - name: Keys
-    description: Key generation and metadata
+    description: Gateway & server projections + bundle
   - name: Encryption
-    description: Symmetric & asymmetric encryption, signing & verification
-  - name: Bundles
-    description: Device credential bundles (TLS + signing private keys + encryption cert)
-  - name: EST
-    description: Enrollment over Secure Transport (RFC 7030)
+    description: Encryption certificate hierarchy lookup
+
 components:
   securitySchemes:
-    ApiKeyHeader:
+    ApiKeyAuth:
       type: apiKey
       in: header
       name: X-API-Key
-      description: Required on every request
+      description: API key for authentication and authorization
+    ClientCertCN:
+      type: apiKey
+      in: header
+      name: X-Client-Cert-CN
+      description: Forwarded Common Name from client certificate (mTLS terminated at proxy)
+    ClientCertDN:
+      type: apiKey
+      in: header
+      name: X-Client-Cert-DN
+      description: Forwarded Distinguished Name from client certificate (mTLS terminated at proxy)
+
   schemas:
-    CertificateRequest:
+    PemComponent:
       type: object
       properties:
-        csr:
+        content:
           type: string
-          format: pem
-          description: Optional PEM-encoded CSR (if omitted, server generates keypair)
-        subjectDn:
+          description: PEM-encoded content
+        checksum:
           type: string
-          example: CN=device-123.example.com,O=ExampleCorp,OU=IoT
-        validityDays:
+          description: SHA-256 hex checksum of the decoded content
+      required: [content, checksum]
+
+    Validity:
+      type: object
+      properties:
+        from:
+          type: string
+          format: date-time
+        till:
+          type: string
+          format: date-time
+      required: [from, till]
+
+    RecipientIdentifier:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [serial, hostname, orgId, name]
+        id:
+          type: string
+      required: [type, id]
+
+    CertificateBasic:
+      type: object
+      properties:
+        certId:
+          type: string
+          description: Serial Number (SN)
+        cn:
+          type: string
+        dn:
+          type: string
+        validity:
+          $ref: '#/components/schemas/Validity'
+        version:
           type: integer
-          minimum: 1
-          maximum: 3650
-          example: 365
         purpose:
           type: string
-          enum: [tls, signing, encryption, other]
-          example: tls
-      required: [subjectDn, validityDays, purpose]
+          enum: [identity, encryption, signing]
+        status:
+          type: string
+          enum: [active, expired, pending, revoked]
+        recipientType:
+          type: string
+          enum: [gateway, server, provider, master]
+        recipientIdentifier:
+          $ref: '#/components/schemas/RecipientIdentifier'
+      required:
+        - certId
+        - cn
+        - dn
+        - validity
+        - version
+        - purpose
+        - status
+        - recipientType
+        - recipientIdentifier
 
-    CertificateResponse:
+    CertificateDetails:
+      allOf:
+        - $ref: '#/components/schemas/CertificateBasic'
       type: object
       properties:
-        serialNumber:
-          type: string
-        certificatePem:
-          type: string
-          format: pem
-        privateKeyPem:
-          type: string
-          format: pem
-          description: Returned only if server-generated
-        chainPem:
-          type: string
-          format: pem
-        issuedAt:
-          type: string
-          format: date-time
-        expiresAt:
-          type: string
-          format: date-time
-      required: [serialNumber, certificatePem, issuedAt, expiresAt]
-
-    CertificateSummary:
-      type: object
-      properties:
-        serialNumber: { type: string }
-        subjectDn: { type: string }
-        purpose: { type: string, enum: [tls, signing, encryption, other] }
-        status: { type: string, enum: [active, revoked, expired, pending] }
-        issuedAt: { type: string, format: date-time }
-        expiresAt: { type: string, format: date-time }
-
-    CertificateBundleJson:
-      type: object
-      required: [deviceId, bundleId, generatedAt, components]
-      properties:
-        deviceId: { type: string, example: dev-uuid-abc123 }
-        bundleId: { type: string, example: bundle-20260213-uuid-789 }
-        generatedAt: { type: string, format: date-time }
-        expiresAt: { type: string, format: date-time }
-        components:
-          type: object
-          additionalProperties:
-            type: object
-            properties:
-              purpose: { type: string, enum: [tls, signing, encryption] }
-              serialNumber: { type: string }
-              subjectDn: { type: string }
-              issuedAt: { type: string, format: date-time }
-              expiresAt: { type: string, format: date-time }
-              certificatePem: { type: string, format: pem }
-              privateKeyPem:
-                type: string
-                format: pem
-                description: Included for tls and signing when server-generated
-              chainPem: { type: string, format: pem }
-        metadata:
+        subject:
           type: object
           properties:
-            rootCaThumbprint: { type: string, format: sha256 }
-            cloudVerificationCertPem:
+            commonName:
               type: string
-              format: pem
-              description: Optional – public cert for device to verify cloud signatures
+            organization:
+              type: string
+            organizationalUnit:
+              type: string
+            country:
+              type: string
+            state:
+              type: string
+            locality:
+              type: string
+          additionalProperties: true
+        issuer:
+          type: object
+          properties:
+            commonName:
+              type: string
+            organization:
+              type: string
+            organizationalUnit:
+              type: string
+            country:
+              type: string
+            state:
+              type: string
+            locality:
+              type: string
+          additionalProperties: true
+        keyUsage:
+          type: array
+          items:
+            type: string
+        extendedKeyUsage:
+          type: array
+          items:
+            type: string
+        publicKeyAlgorithm:
+          type: string
+        signatureAlgorithm:
+          type: string
 
-    EncryptionRequest:
+    CertificateContent:
       type: object
-      required: [data, algorithm, keyReference]
       properties:
-        data: { type: string, format: base64 }
-        algorithm: { type: string, example: AES-256-GCM or SHA256withECDSA }
-        keyReference: { type: string, example: /devices/dev-123/keys/key-456 }
-        iv: { type: string, format: base64, description: For symmetric }
+        certPem:
+          $ref: '#/components/schemas/PemComponent'
+        privatePem:
+          $ref: '#/components/schemas/PemComponent'
 
-    EncryptionResponse:
+    GatewayCertBundle:
       type: object
       properties:
-        result: { type: string, format: base64 }
-        iv: { type: string, format: base64 }
-        tag: { type: string, format: base64 }
+        identity:
+          type: object
+          properties:
+            certPem: { $ref: '#/components/schemas/PemComponent' }
+            privatePem: { $ref: '#/components/schemas/PemComponent' }
+          required: [certPem, privatePem]
+        signing:
+          type: object
+          properties:
+            privatePem: { $ref: '#/components/schemas/PemComponent' }
+          required: [privatePem]
+        encryption:
+          type: array
+          items:
+            type: object
+            properties:
+              keyId: { type: string }
+              certPem: { $ref: '#/components/schemas/PemComponent' }
+              privatePem: { $ref: '#/components/schemas/PemComponent' }
+            required: [keyId, certPem, privatePem]
 
-    ErrorResponse:
+    CertificateProvisionRequest:
       type: object
-      required: [code, message]
       properties:
-        code: { type: integer }
-        message: { type: string }
+        purpose:
+          type: string
+          enum: [identity, encryption, signing]
+        recipientType:
+          type: string
+          enum: [gateway, server, provider, master]
+        recipientId:
+          type: string
+        orgId:
+          type: string
+        validityDays:
+          type: integer
+          default: 365
+      required: [purpose, recipientType, recipientId]
+
+    GatewayRegistrationRequest:
+      type: object
+      properties:
+        serialNo:
+          type: string
+        orgId:
+          type: string
+      required: [serialNo]
+
+    ServerRegistrationRequest:
+      type: object
+      properties:
+        hostname:
+          type: string
+        orgId:
+          type: string
+      required: [hostname]
+
+    StatusUpdateRequest:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [active]
+      required: [status]
+
+    RevocationRequest:
+      type: object
+      properties:
+        reason:
+          type: string
+
+    ProblemDetail:
+      type: object
+      properties:
+        type:
+          type: string
+          format: uri-reference
+          example: https://example.com/errors/pending-conflict
+        title:
+          type: string
+          example: Conflict
+        status:
+          type: integer
+          example: 409
+        detail:
+          type: string
+          example: A pending certificate already exists for this recipient and purpose.
+        instance:
+          type: string
+          format: uri
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+              message:
+                type: string
+      required: [title, status, detail]
 
   parameters:
-    deviceId:
-      name: deviceId
-      in: path
-      required: true
-      schema: { type: string }
-    certId:
+    CertIdParam:
       name: certId
       in: path
       required: true
-      schema: { type: string }
-    limit:
-      name: limit
+      schema:
+        type: string
+    GwSerialParam:
+      name: gw-serial
+      in: path
+      required: true
+      schema:
+        type: string
+    HostnameParam:
+      name: hostname
+      in: path
+      required: true
+      schema:
+        type: string
+    FetchContentParam:
+      name: fetchContent
       in: query
-      schema: { type: integer, default: 20, minimum: 1 }
-    offset:
-      name: offset
+      schema:
+        type: boolean
+        default: false
+    IncludePublicParam:
+      name: includePublic
       in: query
-      schema: { type: integer, default: 0, minimum: 0 }
+      schema:
+        type: boolean
+        default: true
+    IncludePrivateParam:
+      name: includePrivate
+      in: query
+      schema:
+        type: boolean
+        default: false
+    FormatParam:
+      name: format
+      in: query
+      schema:
+        type: string
+        enum: [json, xml, zip]
+        default: json
 
   responses:
     Unauthorized:
-      description: Missing or invalid X-API-Key
+      description: Authentication failed (missing or invalid API key or client certificate headers)
       content:
-        application/json:
-          schema: { $ref: '#/components/schemas/ErrorResponse' }
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
     NotFound:
       description: Resource not found
       content:
-        application/json:
-          schema: { $ref: '#/components/schemas/ErrorResponse' }
-    Forbidden:
-      description: Insufficient permissions or private keys not authorized
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+    BadRequest:
+      description: Invalid request (validation error, malformed body, etc.)
       content:
-        application/json:
-          schema: { $ref: '#/components/schemas/ErrorResponse' }
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+    Conflict:
+      description: Conflict (e.g. pending certificate already exists)
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+
+security:
+  - ApiKeyAuth: []
+    ClientCertCN: []
+    ClientCertDN: []
 
 paths:
   /certificates:
     get:
       tags: [Certificates]
-      summary: List/search certificates (global view)
       operationId: listCertificates
-      parameters:
-        - name: deviceId
-          in: query
-          schema: { type: string }
-        - name: purpose
-          in: query
-          schema: { type: string, enum: [tls, signing, encryption, other] }
-        - name: status
-          in: query
-          schema: { type: string, enum: [active, revoked, expired, pending] }
-        - $ref: '#/components/parameters/limit'
-        - $ref: '#/components/parameters/offset'
-      responses:
-        '200':
-          description: Paginated list
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  items: { type: array, items: { $ref: '#/components/schemas/CertificateSummary' } }
-                  total: { type: integer }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-
-    post:
-      tags: [Certificates]
-      summary: Issue new certificate (global / shared)
-      operationId: issueCertificateGlobal
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/CertificateRequest' }
-      responses:
-        '201':
-          description: Certificate created
-          content:
-            application/json: { schema: { $ref: '#/components/schemas/CertificateResponse' } }
-
-  /certificates/{certId}:
-    get:
-      tags: [Certificates]
-      summary: Get certificate details
-      operationId: getCertificate
-      parameters:
-        - $ref: '#/components/parameters/certId'
-      responses:
-        '200':
-          description: Certificate Summary
-          content:
-            application/json: { schema: { $ref: '#/components/schemas/CertificateResponse' } }
-        '404': { $ref: '#/components/responses/NotFound' }
-
-  /devices/{deviceId}/certificates:
-    post:
-      tags: [Certificates, Devices]
-      summary: Issue certificate for specific device
-      operationId: issueDeviceCertificate
-      parameters:
-        - $ref: '#/components/parameters/deviceId'
-      requestBody:
-        content:
-          application/json: { schema: { $ref: '#/components/schemas/CertificateRequest' } }
-      responses:
-        '201':
-          description: cert
-          content:
-            application/json: { schema: { $ref: '#/components/schemas/CertificateResponse' } }
-
-  /devices/{deviceId}/bundle:
-    get:
-      tags: [Bundles, Devices]
-      summary: Download device credential bundle
+      summary: Search certificates
       description: |
-        Returns TLS keypair, signing keypair (private + cert), encryption cert (public only).
-        Private keys included for tls & signing purposes when server-generated.
-        Use mTLS + API key; prefer short-lived bundles and one-time download enforcement.
-      operationId: getDeviceBundle
-      security:
-        - ApiKeyHeader: []
+        Returns basic info for certificates matching query filters.  
+        Supports filtering by recipient (`for`, `id`, `idtype`), `purpose`, `status`, `dn`, etc.
       parameters:
-        - $ref: '#/components/parameters/deviceId'
-        - name: format
+        - name: for
           in: query
           schema:
             type: string
-            enum: [json, xml, zip, pkcs12]
-            default: json
-        - name: password
+            enum: [gateway, server, provider, master]
+        - name: id
           in: query
-          schema: { type: string }
-          description: Required for pkcs12
-        - name: includeChain
+          schema:
+            type: string
+        - name: idtype
           in: query
-          schema: { type: boolean, default: true }
+          schema:
+            type: string
+            enum: [sn, name, serial, hostname, orgId]
         - name: purpose
           in: query
-          schema: { type: string }
-          description: Comma-separated subset (tls,signing,encryption)
+          schema:
+            type: string
+            enum: [identity, encryption, signing]
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [active, expired, pending, revoked]
+        - name: dn
+          in: query
+          schema:
+            type: string
       responses:
         '200':
-          description: Bundle in requested format
+          description: List of basic certificate records
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/CertificateBundleJson' }
-            application/xml:
-              schema: { type: string, format: binary }
-            application/zip:
-              schema: { type: string, format: binary }
-            application/pkcs12:
-              schema: { type: string, format: binary }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '410':
-          description: Bundle expired or already consumed
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CertificateBasic'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
 
-  /encryption/sign:
     post:
-      tags: [Encryption]
-      summary: Cloud/backend signs data
+      tags: [Certificates]
+      operationId: provisionCertificate
+      summary: Provision a new certificate
       description: |
-        Signs data using a cloud-managed private key (not per-device keys).
-        Devices sign locally using private key from bundle.
-      operationId: cloudSign
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/EncryptionRequest' }
-      responses:
-        '200':
-          description: Result of Encryption Signings
-          content:
-            application/json: { schema: { $ref: '#/components/schemas/EncryptionResponse' } }
-
-  /encryption/verify:
-    post:
-      tags: [Encryption]
-      summary: Verify signature
-      operationId: verifySignature
+        Creates a new certificate for the specified recipient and purpose.  
+        Starts in `pending` status.  
+        Returns **409 Conflict** if a `pending` certificate already exists for this recipient + purpose.
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              type: object
-              properties:
-                data: { type: string, format: base64 }
-                signature: { type: string, format: base64 }
-                algorithm: { type: string }
-                certReference: { type: string }
+              $ref: '#/components/schemas/CertificateProvisionRequest'
+      responses:
+        '201':
+          description: Certificate provisioned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CertificateBasic'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /certificates/{certId}:
+    parameters:
+      - $ref: '#/components/parameters/CertIdParam'
+    get:
+      tags: [Certificates]
+      operationId: getCertificate
+      summary: Get Basic Cert Info
+      description: |
+        Returns basic certificate information.  
+        Use `?fetchContent=true` to also embed PEM content (respecting includePublic/includePrivate).
+      parameters:
+        - $ref: '#/components/parameters/FetchContentParam'
+        - $ref: '#/components/parameters/IncludePublicParam'
+        - $ref: '#/components/parameters/IncludePrivateParam'
       responses:
         '200':
-          description: Verification result
+          description: Certificate information
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/CertificateBasic'
+                  - type: object
+                    properties:
+                      basic:
+                        $ref: '#/components/schemas/CertificateBasic'
+                      content:
+                        $ref: '#/components/schemas/CertificateContent'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    post:
+      tags: [Certificates]
+      operationId: renewCertificate
+      summary: Renew certificate (new pending version)
+      description: |
+        Creates a new version of the certificate for the same recipient and purpose.  
+        The new version starts in `pending` status.  
+        Returns **409 Conflict** if a `pending` version already exists for this recipient + purpose.
+      responses:
+        '201':
+          description: New pending certificate created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CertificateBasic'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+    patch:
+      tags: [Certificates]
+      operationId: updateCertificateStatus
+      summary: Transition status (pending → active)
+      description: |
+        Explicitly activates a pending certificate by setting status to `active`.  
+        Only allowed when current status is `pending`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StatusUpdateRequest'
+      responses:
+        '200':
+          description: Status updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CertificateBasic'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags: [Certificates]
+      operationId: revokeCertificate
+      summary: Revoke certificate
+      description: |
+        Marks the certificate as `revoked`.  
+        Optional revocation reason can be provided in the body.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RevocationRequest'
+      responses:
+        '200':
+          description: Certificate revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CertificateBasic'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /certificates/{certId}/details:
+    get:
+      tags: [Certificates]
+      operationId: getCertificateDetails
+      summary: Get Full Cert Info
+      description: |
+        Returns full parsed certificate details (subject, issuer, keyUsage, extendedKeyUsage, algorithms, etc.).  
+        Use `?fetchContent=true` to also embed PEM content.
+      parameters:
+        - $ref: '#/components/parameters/FetchContentParam'
+        - $ref: '#/components/parameters/IncludePublicParam'
+        - $ref: '#/components/parameters/IncludePrivateParam'
+      responses:
+        '200':
+          description: Detailed certificate information
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  valid: { type: boolean }
+                  details:
+                    $ref: '#/components/schemas/CertificateDetails'
+                  content:
+                    $ref: '#/components/schemas/CertificateContent'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
 
-  /.well-known/est/{profile}/cacerts:
+  /certificates/{certId}/content:
     get:
-      tags: [EST]
-      summary: Get CA certificates
-      operationId: estGetCaCerts
-      parameters:
-        - name: profile
-          in: path
-          required: true
-          schema: { type: string }
-      responses:
-        '200':
-          description: CA certificates in PKCS7 format.
-          content:
-            application/pkcs7-mime:
-              schema: { type: string, format: binary }
-
-  /.well-known/est/{profile}/simpleenroll:
-    post:
-      tags: [EST]
-      summary: Initial enrollment
+      tags: [Certificates]
+      operationId: getCertificateContent
+      summary: Get PEM content only
       description: |
-        Uses mTLS with bootstrap certificate + X-API-Key.
-        Server generates keypairs (including signing private key) if needed.
-        Private keys delivered later via /bundle.
-      operationId: estSimpleEnroll
+        Returns only the PEM content (certificate and optional private key).  
+        Controlled by `includePublic` and `includePrivate` query parameters.
       parameters:
-        - name: profile
-          in: path
-          required: true
-          schema: { type: string }
-      requestBody:
-        content:
-          application/pkcs10:
-            schema: { type: string, format: binary }
+        - $ref: '#/components/parameters/IncludePublicParam'
+        - $ref: '#/components/parameters/IncludePrivateParam'
       responses:
         '200':
-          description: cert
+          description: Certificate content
           content:
-            application/pkcs7-mime:
-              schema: { type: string, format: binary }
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CertificateContent'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
 
-  /.well-known/est/{profile}/simplereenroll:
+  /certificates/encryption:
+    get:
+      tags: [Encryption]
+      operationId: listEncryptionCertificates
+      parameters:
+        - name: key
+          in: query
+          schema:
+            type: string
+            example: RTG/BAA/LILLIPUT/ORGID
+      responses:
+        '200':
+          description: Matching encryption certificates
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CertificateBasic'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /certificates/encryption/{key}:
+    get:
+      tags: [Encryption]
+      operationId: getEncryptionCertificate
+      description: |
+        Retrieves the encryption certificate for the exact key segment.  
+        Use `?fetchContent=true` to include PEM content inline.
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/FetchContentParam'
+        - $ref: '#/components/parameters/IncludePublicParam'
+        - $ref: '#/components/parameters/IncludePrivateParam'
+      responses:
+        '200':
+          description: Encryption certificate
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/CertificateBasic'
+                  - type: object
+                    properties:
+                      basic:
+                        $ref: '#/components/schemas/CertificateBasic'
+                      content:
+                        $ref: '#/components/schemas/CertificateContent'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /devices/gateways:
     post:
-      tags: [EST]
-      summary: Re-enrollment / renewal
-      operationId: estSimpleReenroll
-      parameters:
-        - name: profile
-          in: path
-          required: true
-          schema: { type: string }
+      tags: [Devices]
+      operationId: registerGateway
+      summary: Register gateway + auto-provision identity + signing certs
       requestBody:
+        required: true
         content:
-          application/pkcs10:
-            schema: { type: string, format: binary }
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GatewayRegistrationRequest'
+      responses:
+        '201':
+          description: Gateway registered
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  serialNo:
+                    type: string
+                  certificates:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CertificateBasic'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /devices/gateways/{gw-serial}:
+    get:
+      tags: [Devices]
+      operationId: getGateway
+      summary: Gateway overview + list of all its certificates (basic only)
+      description: |
+        Returns gateway metadata + list of **all** its certificates (basic info only – no content).  
+        Use purpose-specific sub-resources for individual access or /bundle for full content.
+      parameters:
+        - $ref: '#/components/parameters/GwSerialParam'
       responses:
         '200':
-          description: cert
+          description: Gateway details and certificates
           content:
-            application/pkcs7-mime:
-              schema: { type: string, format: binary }
+            application/json:
+              schema:
+                type: object
+                properties:
+                  serialNo:
+                    type: string
+                  certificates:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CertificateBasic'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
 
-security:
-  - ApiKeyHeader: []
-  
+  /devices/gateways/{gw-serial}/identity:
+    get:
+      tags: [Devices]
+      operationId: getGatewayIdentityCert
+      summary: Get the single identity certificate for the gateway
+      description: |
+        Returns the single identity certificate for this gateway.  
+        Use `?fetchContent=true` to include PEM content (public + optional private).
+      parameters:
+        - $ref: '#/components/parameters/GwSerialParam'
+        - $ref: '#/components/parameters/FetchContentParam'
+        - $ref: '#/components/parameters/IncludePublicParam'
+        - $ref: '#/components/parameters/IncludePrivateParam'
+      responses:
+        '200':
+          description: Identity certificate
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/CertificateBasic'
+                  - type: object
+                    properties:
+                      basic:
+                        $ref: '#/components/schemas/CertificateBasic'
+                      content:
+                        $ref: '#/components/schemas/CertificateContent'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /devices/gateways/{gw-serial}/signing:
+    get:
+      tags: [Devices]
+      operationId: getGatewaySigningCert
+      summary: Get signing certificate (404 if none issued)
+      description: |
+        Returns the signing certificate if issued.  
+        Returns **404 Not Found** if no signing certificate exists for this gateway.
+      parameters:
+        - $ref: '#/components/parameters/GwSerialParam'
+        - $ref: '#/components/parameters/FetchContentParam'
+        - $ref: '#/components/parameters/IncludePublicParam'
+        - $ref: '#/components/parameters/IncludePrivateParam'
+      responses:
+        '200':
+          description: Signing certificate
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/CertificateBasic'
+                  - type: object
+                    properties:
+                      basic:
+                        $ref: '#/components/schemas/CertificateBasic'
+                      content:
+                        $ref: '#/components/schemas/CertificateContent'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /devices/gateways/{gw-serial}/encryption:
+    get:
+      tags: [Devices]
+      operationId: getGatewayEncryptionCert
+      summary: Get encryption certificate (404 if none issued)
+      description: |
+        Returns the encryption certificate if issued for this gateway.  
+        Returns **404 Not Found** if none exists.
+      parameters:
+        - $ref: '#/components/parameters/GwSerialParam'
+        - $ref: '#/components/parameters/FetchContentParam'
+        - $ref: '#/components/parameters/IncludePublicParam'
+        - $ref: '#/components/parameters/IncludePrivateParam'
+      responses:
+        '200':
+          description: Encryption certificate
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/CertificateBasic'
+                  - type: object
+                    properties:
+                      basic:
+                        $ref: '#/components/schemas/CertificateBasic'
+                      content:
+                        $ref: '#/components/schemas/CertificateContent'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /devices/gateways/{gw-serial}/bundle:
+    get:
+      tags: [Devices]
+      operationId: getGatewayCertBundle
+      summary: Get complete certificate bundle (identity full, signing private-only, encryption array by keyId)
+      description: |
+        Returns a complete content bundle for gateway bootstrapping:  
+        • identity: cert + private key  
+        • signing: private key only  
+        • encryption: array of certs (with keyId), each with cert + private key  
+        Supports ?format=json (default), xml, or zip.
+      parameters:
+        - $ref: '#/components/parameters/GwSerialParam'
+        - $ref: '#/components/parameters/FormatParam'
+      responses:
+        '200':
+          description: Gateway certificate bundle
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GatewayCertBundle'
+            application/xml:
+              schema:
+                type: string
+                description: Equivalent XML structure
+            application/zip:
+              schema:
+                type: string
+                format: binary
+                description: ZIP archive with PEM files organized by type/keyId
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /devices/servers:
+    post:
+      tags: [Devices]
+      operationId: registerServer
+      summary: Register server + provision identity certificate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServerRegistrationRequest'
+      responses:
+        '201':
+          description: Server registered
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /devices/servers/{hostname}:
+    get:
+      tags: [Devices]
+      operationId: getServer
+      summary: Get server + its identity certificate
+      parameters:
+        - $ref: '#/components/parameters/HostnameParam'
+        - $ref: '#/components/parameters/FetchContentParam'
+        - $ref: '#/components/parameters/IncludePublicParam'
+        - $ref: '#/components/parameters/IncludePrivateParam'
+      responses:
+        '200':
+          description: Server details and certificate
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    properties:
+                      hostname:
+                        type: string
+                      certificate:
+                        $ref: '#/components/schemas/CertificateBasic'
+                  - type: object
+                    properties:
+                      hostname:
+                        type: string
+                      certificate:
+                        $ref: '#/components/schemas/CertificateBasic'
+                      content:
+                        $ref: '#/components/schemas/CertificateContent'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
