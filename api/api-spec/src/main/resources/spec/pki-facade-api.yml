@@ -14,21 +14,25 @@ info:
     **Statuses** — pending → active (explicit PATCH only) → expired (automatic) / revoked (explicit DELETE).
 
     **Creation & Renewal**  
-    • New certificates start in `pending`.  
-    • Duplicates allowed (new version) for renewal.  
-    • **409 Conflict** returned if a `pending` certificate already exists for the same recipient + purpose during provisioning or renewal.
+    • New certificates (provision, CSR, device registration) are issued directly as **active**.  
+    • Renewals create a new version in **pending** status (old version remains active until the new one is explicitly activated).  
+    • **409 Conflict** returned if a pending renewal version already exists for the same recipient + purpose.
 
     **Activation** — Only `pending` → `active` via PATCH is supported.
 
     **Revocation** — DELETE marks as `revoked`; optional reason in body.
 
     **Retrieval**  
-    • Telescopic: basic info → /details (parsed fields) → /content (PEM).  
-    • `?fetchContent=true` embeds content inline on many endpoints.  
-    • Content control: `?includePublic=true/false` (default true), `?includePrivate=true/false` (default false).
+    • Telescopic: basic info → /details (parsed fields + issuerChain) → /content (PEM + optional trustChainPem).  
+    • `?fetchContent=true` is a **convenience parameter intended for single-certificate endpoints** (by certId, device sub-resources, /encryption/{key}).  
+      It is ignored (or may return 400 in strict mode) on list-style endpoints that can return multiple records.  
+    • Content control:  
+      - `?includePublic=true/false` (default true)  
+      - `?includePrivate=true/false` (default false)  
+      - `?includeChain=true/false` (default true) — when false, `trustChainPem` field is omitted from content responses
 
     **Device Projections**  
-    • Gateways support `/identity`, `/signing` (404 if none), `/encryption` (404 if none), and `/bundle` (full content package).  
+    • Gateways support `/identity`, `/signing` (404 if none), `/encryption` (404 if none), and `/bundle` (full content package with mandatory trustChainPem for identity).  
     • Servers only have identity certificate.
 
     **Security**  
@@ -42,10 +46,10 @@ info:
 
 servers:
   - url: https://api.pki.learning.eeworx.dev/v2
-    description: Production
+    description: Production (v2)
   - url: https://api-dev.pki.learning.eeworx.dev/v2
     description: Development / staging
-    
+
 
 tags:
   - name: Certificates
@@ -191,6 +195,17 @@ components:
           type: string
         signatureAlgorithm:
           type: string
+        issuerChain:
+          type: array
+          items:
+            type: object
+            properties:
+              commonName:
+                type: string
+              dn:
+                type: string
+            required: [dn]
+          description: Structured issuer hierarchy from immediate issuer to root
 
     CertificateContent:
       type: object
@@ -199,6 +214,11 @@ components:
           $ref: '#/components/schemas/PemComponent'
         privatePem:
           $ref: '#/components/schemas/PemComponent'
+        trustChainPem:
+          type: array
+          items:
+            $ref: '#/components/schemas/PemComponent'
+          description: PEM-encoded trust chain (intermediates + root) with checksums. Omitted when includeChain=false.
 
     GatewayCertBundle:
       type: object
@@ -206,22 +226,33 @@ components:
         identity:
           type: object
           properties:
-            certPem: { $ref: '#/components/schemas/PemComponent' }
-            privatePem: { $ref: '#/components/schemas/PemComponent' }
-          required: [certPem, privatePem]
+            certPem:
+              $ref: '#/components/schemas/PemComponent'
+            privatePem:
+              $ref: '#/components/schemas/PemComponent'
+            trustChainPem:
+              type: array
+              items:
+                $ref: '#/components/schemas/PemComponent'
+              description: PEM-encoded trust chain for the identity certificate (mandatory)
+          required: [certPem, privatePem, trustChainPem]
         signing:
           type: object
           properties:
-            privatePem: { $ref: '#/components/schemas/PemComponent' }
+            privatePem:
+              $ref: '#/components/schemas/PemComponent'
           required: [privatePem]
         encryption:
           type: array
           items:
             type: object
             properties:
-              keyId: { type: string }
-              certPem: { $ref: '#/components/schemas/PemComponent' }
-              privatePem: { $ref: '#/components/schemas/PemComponent' }
+              keyId:
+                type: string
+              certPem:
+                $ref: '#/components/schemas/PemComponent'
+              privatePem:
+                $ref: '#/components/schemas/PemComponent'
             required: [keyId, certPem, privatePem]
 
     CertificateProvisionRequest:
@@ -311,36 +342,49 @@ components:
       required: true
       schema:
         type: string
+      description: Certificate Serial Number (SN)
     GwSerialParam:
       name: gw-serial
       in: path
       required: true
       schema:
         type: string
+      description: Gateway serial number
     HostnameParam:
       name: hostname
       in: path
       required: true
       schema:
         type: string
+      description: Server hostname
     FetchContentParam:
       name: fetchContent
       in: query
       schema:
         type: boolean
         default: false
+      description: Include PEM content in the response (intended for single-record endpoints)
     IncludePublicParam:
       name: includePublic
       in: query
       schema:
         type: boolean
         default: true
+      description: Include public certificate PEM (default true; false omits certPem)
     IncludePrivateParam:
       name: includePrivate
       in: query
       schema:
         type: boolean
         default: false
+      description: Include private key PEM (default false; false omits privatePem)
+    IncludeChainParam:
+      name: includeChain
+      in: query
+      schema:
+        type: boolean
+        default: true
+      description: Include trust chain PEM (default true; false omits trustChainPem field)
     FormatParam:
       name: format
       in: query
@@ -348,6 +392,7 @@ components:
         type: string
         enum: [json, xml, zip]
         default: json
+      description: Bundle format (json default)
 
   responses:
     Unauthorized:
@@ -369,7 +414,7 @@ components:
           schema:
             $ref: '#/components/schemas/ProblemDetail'
     Conflict:
-      description: Conflict (e.g. pending certificate already exists)
+      description: Conflict (e.g. pending certificate exists)
       content:
         application/problem+json:
           schema:
@@ -385,25 +430,29 @@ paths:
     get:
       tags: [Certificates]
       operationId: listCertificates
-      summary: Search certificates
+      summary: Search certificates (basic info, one row per version)
       description: |
-        Returns basic info for certificates matching query filters.  
-        Supports filtering by recipient (`for`, `id`, `idtype`), `purpose`, `status`, `dn`, etc.
+        Returns basic info for certificates matching the query filters.  
+        Intended for targeted lookups (all certs for a device, provider, server).  
+        Returns **200 OK with empty array []** when no certificates match.
       parameters:
         - name: for
           in: query
           schema:
             type: string
             enum: [gateway, server, provider, master]
+          description: Recipient type filter
         - name: id
           in: query
           schema:
             type: string
+          description: Recipient ID
         - name: idtype
           in: query
           schema:
             type: string
             enum: [sn, name, serial, hostname, orgId]
+          description: ID type
         - name: purpose
           in: query
           schema:
@@ -418,6 +467,12 @@ paths:
           in: query
           schema:
             type: string
+        - name: sort
+          in: query
+          schema:
+            type: string
+          description: |
+            Sort by field(s). Prefix '-' for descending. Examples: validity.from, -version, status,cn
       responses:
         '200':
           description: List of basic certificate records
@@ -431,17 +486,14 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
 
     post:
       tags: [Certificates]
       operationId: provisionCertificate
       summary: Provision a new certificate
       description: |
-        Creates a new certificate for the specified recipient and purpose.  
-        Starts in `pending` status.  
-        Returns **409 Conflict** if a `pending` certificate already exists for this recipient + purpose.
+        Provisions a new certificate, issued directly in **active** status.  
+        Returns 409 if a pending renewal already exists for this recipient + purpose.
       requestBody:
         required: true
         content:
@@ -462,6 +514,55 @@ paths:
         '409':
           $ref: '#/components/responses/Conflict'
 
+  /certificates/from-csr:
+    post:
+      tags: [Certificates]
+      operationId: signCsr
+      summary: Sign a Certificate Signing Request (CSR)
+      description: |
+        Accepts a PEM-encoded CSR and issues a signed certificate.  
+        The subject (CN/DN) is taken from the CSR and used as the primary identifier.  
+        - If an active certificate already exists for the same CN/DN → treated as renewal → new version created in **pending** status.  
+        - If no existing certificate → issued directly in **active** status.  
+        - Returns **409 Conflict** if a pending version already exists for this CN/DN.  
+        Optional recipientType/recipientId can be supplied for validation/context (must match CSR subject if provided).  
+        Backend may override/validate fields (expiry, SANs, etc.).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                csrPem:
+                  type: string
+                  description: PEM-encoded CSR
+                purpose:
+                  type: string
+                  enum: [identity, encryption, signing]
+                recipientType:
+                  type: string
+                  enum: [gateway, server, provider, master]
+                recipientId:
+                  type: string
+                validityDays:
+                  type: integer
+                  default: 365
+              required: [csrPem, purpose]
+      responses:
+        '201':
+          description: Certificate signed (active if new, pending if renewal)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CertificateBasic'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
   /certificates/{certId}:
     parameters:
       - $ref: '#/components/parameters/CertIdParam'
@@ -470,15 +571,16 @@ paths:
       operationId: getCertificate
       summary: Get Basic Cert Info
       description: |
-        Returns basic certificate information.  
-        Use `?fetchContent=true` to also embed PEM content (respecting includePublic/includePrivate).
+        Basic certificate information.  
+        ?fetchContent=true embeds content (cert, optional private/chain per include params).
       parameters:
         - $ref: '#/components/parameters/FetchContentParam'
         - $ref: '#/components/parameters/IncludePublicParam'
         - $ref: '#/components/parameters/IncludePrivateParam'
+        - $ref: '#/components/parameters/IncludeChainParam'
       responses:
         '200':
-          description: Certificate information
+          description: Basic certificate information
           content:
             application/json:
               schema:
@@ -502,9 +604,8 @@ paths:
       operationId: renewCertificate
       summary: Renew certificate (new pending version)
       description: |
-        Creates a new version of the certificate for the same recipient and purpose.  
-        The new version starts in `pending` status.  
-        Returns **409 Conflict** if a `pending` version already exists for this recipient + purpose.
+        Creates a new pending version for renewal (old certificate remains active).  
+        Returns 409 if a pending version already exists.
       responses:
         '201':
           description: New pending certificate created
@@ -526,8 +627,7 @@ paths:
       operationId: updateCertificateStatus
       summary: Transition status (pending → active)
       description: |
-        Explicitly activates a pending certificate by setting status to `active`.  
-        Only allowed when current status is `pending`.
+        Activates pending certificate.
       requestBody:
         required: true
         content:
@@ -553,8 +653,7 @@ paths:
       operationId: revokeCertificate
       summary: Revoke certificate
       description: |
-        Marks the certificate as `revoked`.  
-        Optional revocation reason can be provided in the body.
+        Marks certificate as revoked. Optional reason.
       requestBody:
         content:
           application/json:
@@ -575,20 +674,23 @@ paths:
           $ref: '#/components/responses/NotFound'
 
   /certificates/{certId}/details:
+    parameters:
+      - $ref: '#/components/parameters/CertIdParam'
     get:
       tags: [Certificates]
       operationId: getCertificateDetails
       summary: Get Full Cert Info
       description: |
-        Returns full parsed certificate details (subject, issuer, keyUsage, extendedKeyUsage, algorithms, etc.).  
-        Use `?fetchContent=true` to also embed PEM content.
+        Parsed details (subject, issuer, usages, algorithms, issuerChain).  
+        ?fetchContent=true embeds content (cert, optional private/chain per include params).
       parameters:
         - $ref: '#/components/parameters/FetchContentParam'
         - $ref: '#/components/parameters/IncludePublicParam'
         - $ref: '#/components/parameters/IncludePrivateParam'
+        - $ref: '#/components/parameters/IncludeChainParam'
       responses:
         '200':
-          description: Detailed certificate information
+          description: Full certificate details
           content:
             application/json:
               schema:
@@ -606,19 +708,22 @@ paths:
           $ref: '#/components/responses/NotFound'
 
   /certificates/{certId}/content:
+    parameters:
+      - $ref: '#/components/parameters/CertIdParam'
     get:
       tags: [Certificates]
       operationId: getCertificateContent
       summary: Get PEM content only
       description: |
-        Returns only the PEM content (certificate and optional private key).  
-        Controlled by `includePublic` and `includePrivate` query parameters.
+        PEM content (cert, optional private/chain per include params).  
+        If includeChain=false, trustChainPem omitted.
       parameters:
         - $ref: '#/components/parameters/IncludePublicParam'
         - $ref: '#/components/parameters/IncludePrivateParam'
+        - $ref: '#/components/parameters/IncludeChainParam'
       responses:
         '200':
-          description: Certificate content
+          description: Certificate PEM content
           content:
             application/json:
               schema:
@@ -634,6 +739,9 @@ paths:
     get:
       tags: [Encryption]
       operationId: listEncryptionCertificates
+      summary: List encryption certificates by key
+      description: |
+        Matching encryption certificates for key query.
       parameters:
         - name: key
           in: query
@@ -642,7 +750,7 @@ paths:
             example: RTG/BAA/LILLIPUT/ORGID
       responses:
         '200':
-          description: Matching encryption certificates
+          description: Matching encryption certificates (basic)
           content:
             application/json:
               schema:
@@ -655,21 +763,24 @@ paths:
           $ref: '#/components/responses/Unauthorized'
 
   /certificates/encryption/{key}:
+    parameters:
+      - name: key
+        in: path
+        required: true
+        schema:
+          type: string
     get:
       tags: [Encryption]
       operationId: getEncryptionCertificate
+      summary: Get encryption certificate by key
       description: |
-        Retrieves the encryption certificate for the exact key segment.  
-        Use `?fetchContent=true` to include PEM content inline.
+        Encryption certificate for exact key.  
+        ?fetchContent=true embeds content (cert, optional private/chain per include params).
       parameters:
-        - name: key
-          in: path
-          required: true
-          schema:
-            type: string
         - $ref: '#/components/parameters/FetchContentParam'
         - $ref: '#/components/parameters/IncludePublicParam'
         - $ref: '#/components/parameters/IncludePrivateParam'
+        - $ref: '#/components/parameters/IncludeChainParam'
       responses:
         '200':
           description: Encryption certificate
@@ -695,7 +806,9 @@ paths:
     post:
       tags: [Devices]
       operationId: registerGateway
-      summary: Register gateway + auto-provision identity + signing certs
+      summary: Register a new gateway
+      description: |
+        Registers gateway and provisions identity, signing certs in **active** status.
       requestBody:
         required: true
         content:
@@ -704,7 +817,7 @@ paths:
               $ref: '#/components/schemas/GatewayRegistrationRequest'
       responses:
         '201':
-          description: Gateway registered
+          description: Gateway registered with certificates
           content:
             application/json:
               schema:
@@ -724,18 +837,18 @@ paths:
           $ref: '#/components/responses/Conflict'
 
   /devices/gateways/{gw-serial}:
+    parameters:
+      - $ref: '#/components/parameters/GwSerialParam'
     get:
       tags: [Devices]
       operationId: getGateway
-      summary: Gateway overview + list of all its certificates (basic only)
+      summary: Get gateway overview
       description: |
         Returns gateway metadata + list of **all** its certificates (basic info only – no content).  
-        Use purpose-specific sub-resources for individual access or /bundle for full content.
-      parameters:
-        - $ref: '#/components/parameters/GwSerialParam'
+        Use purpose-specific sub-resources for individual access or /bundle for full content.Gateway + certificates     
       responses:
         '200':
-          description: Gateway details and certificates
+          description: Gateway metadata + list of all certificates
           content:
             application/json:
               schema:
@@ -755,18 +868,20 @@ paths:
           $ref: '#/components/responses/NotFound'
 
   /devices/gateways/{gw-serial}/identity:
+    parameters:
+      - $ref: '#/components/parameters/GwSerialParam'
     get:
       tags: [Devices]
       operationId: getGatewayIdentityCert
-      summary: Get the single identity certificate for the gateway
+      summary: Get gateway identity certificate
       description: |
-        Returns the single identity certificate for this gateway.  
-        Use `?fetchContent=true` to include PEM content (public + optional private).
+        Single identity certificate.  
+        ?fetchContent=true embeds content (cert, optional private/chain per include params).
       parameters:
-        - $ref: '#/components/parameters/GwSerialParam'
         - $ref: '#/components/parameters/FetchContentParam'
         - $ref: '#/components/parameters/IncludePublicParam'
         - $ref: '#/components/parameters/IncludePrivateParam'
+        - $ref: '#/components/parameters/IncludeChainParam'
       responses:
         '200':
           description: Identity certificate
@@ -789,18 +904,20 @@ paths:
           $ref: '#/components/responses/NotFound'
 
   /devices/gateways/{gw-serial}/signing:
+    parameters:
+      - $ref: '#/components/parameters/GwSerialParam'
     get:
       tags: [Devices]
       operationId: getGatewaySigningCert
-      summary: Get signing certificate (404 if none issued)
+      summary: Get gateway signing certificate
       description: |
-        Returns the signing certificate if issued.  
-        Returns **404 Not Found** if no signing certificate exists for this gateway.
+        Signing certificate (404 if none).  
+        ?fetchContent=true embeds content (cert, optional private/chain per include params).
       parameters:
-        - $ref: '#/components/parameters/GwSerialParam'
         - $ref: '#/components/parameters/FetchContentParam'
         - $ref: '#/components/parameters/IncludePublicParam'
         - $ref: '#/components/parameters/IncludePrivateParam'
+        - $ref: '#/components/parameters/IncludeChainParam'
       responses:
         '200':
           description: Signing certificate
@@ -823,18 +940,20 @@ paths:
           $ref: '#/components/responses/NotFound'
 
   /devices/gateways/{gw-serial}/encryption:
+    parameters:
+      - $ref: '#/components/parameters/GwSerialParam'
     get:
       tags: [Devices]
       operationId: getGatewayEncryptionCert
-      summary: Get encryption certificate (404 if none issued)
+      summary: Get gateway encryption certificate
       description: |
-        Returns the encryption certificate if issued for this gateway.  
-        Returns **404 Not Found** if none exists.
+        Encryption certificate (404 if none).  
+        ?fetchContent=true embeds content (cert, optional private/chain per include params).
       parameters:
-        - $ref: '#/components/parameters/GwSerialParam'
         - $ref: '#/components/parameters/FetchContentParam'
         - $ref: '#/components/parameters/IncludePublicParam'
         - $ref: '#/components/parameters/IncludePrivateParam'
+        - $ref: '#/components/parameters/IncludeChainParam'
       responses:
         '200':
           description: Encryption certificate
@@ -857,18 +976,28 @@ paths:
           $ref: '#/components/responses/NotFound'
 
   /devices/gateways/{gw-serial}/bundle:
+    parameters:
+      - $ref: '#/components/parameters/GwSerialParam'
     get:
       tags: [Devices]
       operationId: getGatewayCertBundle
-      summary: Get complete certificate bundle (identity full, signing private-only, encryption array by keyId)
+      summary: Get complete certificate bundle
       description: |
         Returns a complete content bundle for gateway bootstrapping:  
         • identity: cert + private key  
         • signing: private key only  
         • encryption: array of certs (with keyId), each with cert + private key  
         Supports ?format=json (default), xml, or zip.
+
+        format=zip: files named per JSON keys  
+        - identity/cert.pem  
+        - identity/private.key  
+        - identity/trust-chain.pem (concat or separate)  
+        - signing/private.key  
+        - encryption/BAA/cert.pem  
+        - encryption/BAA/private.key  
+        etc.
       parameters:
-        - $ref: '#/components/parameters/GwSerialParam'
         - $ref: '#/components/parameters/FormatParam'
       responses:
         '200':
@@ -897,7 +1026,9 @@ paths:
     post:
       tags: [Devices]
       operationId: registerServer
-      summary: Register server + provision identity certificate
+      summary: Register a new server
+      description: |
+        Registers server and provisions identity cert in **active** status.
       requestBody:
         required: true
         content:
@@ -907,6 +1038,15 @@ paths:
       responses:
         '201':
           description: Server registered
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  hostname:
+                    type: string
+                  certificate:
+                    $ref: '#/components/schemas/CertificateBasic'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -915,18 +1055,23 @@ paths:
           $ref: '#/components/responses/Conflict'
 
   /devices/servers/{hostname}:
+    parameters:
+      - $ref: '#/components/parameters/HostnameParam'
     get:
       tags: [Devices]
       operationId: getServer
-      summary: Get server + its identity certificate
+      summary: Get server identity certificate
+      description: |
+        Server metadata + identity certificate.  
+        ?fetchContent=true embeds content (cert, optional private/chain per include params).
       parameters:
-        - $ref: '#/components/parameters/HostnameParam'
         - $ref: '#/components/parameters/FetchContentParam'
         - $ref: '#/components/parameters/IncludePublicParam'
         - $ref: '#/components/parameters/IncludePrivateParam'
+        - $ref: '#/components/parameters/IncludeChainParam'
       responses:
         '200':
-          description: Server details and certificate
+          description: Server + identity certificate
           content:
             application/json:
               schema:
