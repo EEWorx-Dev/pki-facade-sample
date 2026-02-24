@@ -45,9 +45,9 @@ info:
     name: Elisha Ebenezer
 
 servers:
-  - url: https://api.pki.learning.eeworx.dev/v2
-    description: Production (v2)
-  - url: https://api-dev.pki.learning.eeworx.dev/v2
+  - url: https://api.pki.learning.eeworx.dev/
+    description: Production
+  - url: https://api-dev.pki.learning.eeworx.dev/
     description: Development / staging
 
 
@@ -475,7 +475,7 @@ security:
     ClientCertDN: []
 
 paths:
-  /certificates:
+  /v2/certificates:
     get:
       tags: [Certificates]
       operationId: listCertificates
@@ -568,7 +568,7 @@ paths:
         '409':
           $ref: '#/components/responses/Conflict'
 
-  /certificates/from-csr:
+  /v2/certificates/from-csr:
     post:
       tags: [Certificates]
       operationId: signCsr
@@ -614,7 +614,7 @@ paths:
         '409':
           $ref: '#/components/responses/Conflict'
 
-  /certificates/{certId}:
+  /v2/certificates/{certId}:
     parameters:
       - $ref: '#/components/parameters/CertIdParam'
     get:
@@ -725,7 +725,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
-  /certificates/{certId}/details:
+  /v2/certificates/{certId}/details:
     parameters:
       - $ref: '#/components/parameters/CertIdParam'
     get:
@@ -759,7 +759,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
-  /certificates/{certId}/content:
+  /v2/certificates/{certId}/content:
     parameters:
       - $ref: '#/components/parameters/CertIdParam'
     get:
@@ -787,7 +787,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
-  /certificates/encryption:
+  /v2/certificates/encryption:
     get:
       tags: [Encryption]
       operationId: listEncryptionCertificates
@@ -814,7 +814,7 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
 
-  /certificates/encryption/{key}:
+  /v2/certificates/encryption/{key}:
     parameters:
       - name: key
         in: path
@@ -957,7 +957,7 @@ paths:
         '409':
           $ref: '#/components/responses/Conflict'
 
-  /devices/gateways:
+  /v2/devices/gateways:
     post:
       tags: [Devices]
       operationId: registerGateway
@@ -991,7 +991,7 @@ paths:
         '409':
           $ref: '#/components/responses/Conflict'
 
-  /devices/gateways/{gw-serial}:
+  /v2/devices/gateways/{gw-serial}:
     parameters:
       - $ref: '#/components/parameters/GwSerialParam'
     get:
@@ -1022,7 +1022,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
-  /devices/gateways/{gw-serial}/identity:
+  /v2/devices/gateways/{gw-serial}/identity:
     parameters:
       - $ref: '#/components/parameters/GwSerialParam'
     get:
@@ -1058,7 +1058,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
-  /devices/gateways/{gw-serial}/signing:
+  /v2/devices/gateways/{gw-serial}/signing:
     parameters:
       - $ref: '#/components/parameters/GwSerialParam'
     get:
@@ -1094,7 +1094,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
-  /devices/gateways/{gw-serial}/encryption:
+  /v2/devices/gateways/{gw-serial}/encryption:
     parameters:
       - $ref: '#/components/parameters/GwSerialParam'
     get:
@@ -1130,7 +1130,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
-  /devices/gateways/{gw-serial}/bundle:
+  /v2/devices/gateways/{gw-serial}/bundle:
     parameters:
       - $ref: '#/components/parameters/GwSerialParam'
     get:
@@ -1177,7 +1177,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
-  /devices/servers:
+  /v2/devices/servers:
     post:
       tags: [Devices]
       operationId: registerServer
@@ -1209,7 +1209,7 @@ paths:
         '409':
           $ref: '#/components/responses/Conflict'
 
-  /devices/servers/{hostname}:
+  /v2/devices/servers/{hostname}:
     parameters:
       - $ref: '#/components/parameters/HostnameParam'
     get:
