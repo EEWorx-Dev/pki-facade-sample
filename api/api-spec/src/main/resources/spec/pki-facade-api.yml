@@ -39,7 +39,7 @@ info:
     All operations require **both** `X-API-Key` and client certificate headers (`X-Client-Cert-CN` + `X-Client-Cert-DN`) forwarded by reverse proxy.
 
     **Errors** — Standardized as `application/problem+json` (RFC 9457): 400, 401, 404, 409 (pending conflict).
-    
+
   version: 2.0.0
   contact:
     name: Elisha Ebenezer
@@ -58,6 +58,8 @@ tags:
     description: Gateway & server projections + bundle
   - name: Encryption
     description: Encryption certificate hierarchy lookup
+  - name: EST
+    description: Enrollment over Secure Transport (RFC 7030)
 
 components:
   securitySchemes:
@@ -100,15 +102,18 @@ components:
           format: date-time
       required: [from, till]
 
-    RecipientIdentifier:
+    Recipient:
       type: object
       properties:
         type:
           type: string
+          enum: [gateway, server, provider, encryptor]
+        idType:
+          type: string
           enum: [serial, hostname, orgId, name]
         id:
           type: string
-      required: [type, id]
+      required: [type, idType, id]
 
     CertificateBasic:
       type: object
@@ -130,11 +135,8 @@ components:
         status:
           type: string
           enum: [active, expired, pending, revoked]
-        recipientType:
-          type: string
-          enum: [gateway, server, provider, master]
-        recipientIdentifier:
-          $ref: '#/components/schemas/RecipientIdentifier'
+        recipient:
+          $ref: '#/components/schemas/Recipient'
       required:
         - certId
         - cn
@@ -143,8 +145,7 @@ components:
         - version
         - purpose
         - status
-        - recipientType
-        - recipientIdentifier
+        - recipient
 
     CertificateDetails:
       allOf:
@@ -261,17 +262,12 @@ components:
         purpose:
           type: string
           enum: [identity, encryption, signing]
-        recipientType:
-          type: string
-          enum: [gateway, server, provider, master]
-        recipientId:
-          type: string
-        orgId:
-          type: string
+        recipient:
+          $ref: '#/components/schemas/Recipient'
         validityDays:
           type: integer
           default: 365
-      required: [purpose, recipientType, recipientId]
+      required: [purpose, recipient]
 
     GatewayRegistrationRequest:
       type: object
@@ -311,16 +307,12 @@ components:
         type:
           type: string
           format: uri-reference
-          example: https://example.com/errors/pending-conflict
         title:
           type: string
-          example: Conflict
         status:
           type: integer
-          example: 409
         detail:
           type: string
-          example: A pending certificate already exists for this recipient and purpose.
         instance:
           type: string
           format: uri
@@ -334,6 +326,51 @@ components:
               message:
                 type: string
       required: [title, status, detail]
+
+  examples:
+    emptyCertificateList:
+      summary: No matching certificates
+      value: []
+    certificateBasicExample:
+      summary: Single certificate
+      value:
+        certId: "1234567890abcdef"
+        cn: "gw-001.example.com"
+        dn: "CN=gw-001.example.com,O=ExampleOrg"
+        validity:
+          from: "2025-02-01T00:00:00Z"
+          till: "2026-02-01T00:00:00Z"
+        version: 1
+        purpose: identity
+        status: active
+        recipient:
+          type: gateway
+          idType: serial
+          id: "gw-001"
+    problemBadRequest:
+      summary: Bad Request
+      value:
+        title: Bad Request
+        status: 400
+        detail: "Invalid request body"
+    problemUnauthorized:
+      summary: Unauthorized
+      value:
+        title: Unauthorized
+        status: 401
+        detail: "Missing or invalid authentication headers"
+    problemNotFound:
+      summary: Not Found
+      value:
+        title: Not Found
+        status: 404
+        detail: "Resource not found"
+    problemConflict:
+      summary: Conflict
+      value:
+        title: Conflict
+        status: 409
+        detail: "A pending certificate already exists for this recipient and purpose"
 
   parameters:
     CertIdParam:
@@ -401,24 +438,36 @@ components:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/ProblemDetail'
+          examples:
+            default:
+              $ref: '#/components/examples/problemUnauthorized'
     NotFound:
       description: Resource not found
       content:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/ProblemDetail'
+          examples:
+            default:
+              $ref: '#/components/examples/problemNotFound'
     BadRequest:
       description: Invalid request (validation error, malformed body, etc.)
       content:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/ProblemDetail'
+          examples:
+            default:
+              $ref: '#/components/examples/problemBadRequest'
     Conflict:
       description: Conflict (e.g. pending certificate exists)
       content:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/ProblemDetail'
+          examples:
+            default:
+              $ref: '#/components/examples/problemConflict'
 
 security:
   - ApiKeyAuth: []
@@ -482,6 +531,11 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/CertificateBasic'
+              examples:
+                empty:
+                  $ref: '#/components/examples/emptyCertificateList'
+                withResults:
+                  $ref: '#/components/examples/certificateBasicExample'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -540,11 +594,8 @@ paths:
                 purpose:
                   type: string
                   enum: [identity, encryption, signing]
-                recipientType:
-                  type: string
-                  enum: [gateway, server, provider, master]
-                recipientId:
-                  type: string
+                recipient:
+                  $ref: '#/components/schemas/Recipient'
                 validityDays:
                   type: integer
                   default: 365
@@ -655,6 +706,7 @@ paths:
       description: |
         Marks certificate as revoked. Optional reason.
       requestBody:
+        required: false
         content:
           application/json:
             schema:
@@ -801,6 +853,109 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+
+  # EST endpoints (RFC 7030)
+  /.well-known/est/cacerts:
+    get:
+      tags: [EST]
+      operationId: getCaCerts
+      summary: Get CA certificates
+      responses:
+        '200':
+          description: CA certificate chain
+          content:
+            application/pkix-cert:
+              schema:
+                type: string
+                format: binary
+            application/pkcs7-mime:
+              schema:
+                type: string
+                format: binary
+
+  /.well-known/est/simpleenroll:
+    post:
+      tags: [EST]
+      operationId: simpleEnroll
+      summary: Simple enrollment (new certificate)
+      requestBody:
+        required: true
+        content:
+          application/pkcs10:
+            schema:
+              type: string
+              format: binary
+          application/json:
+            schema:
+              type: object
+              properties:
+                csrPem:
+                  type: string
+                purpose:
+                  type: string
+                  enum: [identity, encryption, signing]
+                recipient:
+                  $ref: '#/components/schemas/Recipient'
+              required: [csrPem, purpose]
+      responses:
+        '201':
+          description: Certificate issued (active)
+          content:
+            application/pkix-cert:
+              schema:
+                type: string
+                format: binary
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CertificateBasic'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /.well-known/est/simplereenroll:
+    post:
+      tags: [EST]
+      operationId: simpleReenroll
+      summary: Simple re-enrollment (renewal)
+      requestBody:
+        required: true
+        content:
+          application/pkcs10:
+            schema:
+              type: string
+              format: binary
+          application/json:
+            schema:
+              type: object
+              properties:
+                csrPem:
+                  type: string
+                purpose:
+                  type: string
+                  enum: [identity, encryption, signing]
+                recipient:
+                  $ref: '#/components/schemas/Recipient'
+              required: [csrPem, purpose]
+      responses:
+        '201':
+          description: Renewal certificate issued (pending)
+          content:
+            application/pkix-cert:
+              schema:
+                type: string
+                format: binary
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CertificateBasic'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
 
   /devices/gateways:
     post:
@@ -1096,3 +1251,4 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+          
